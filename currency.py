@@ -1,60 +1,74 @@
-import asyncio
 import aiohttp
+import asyncio
+from datetime import datetime, timedelta
+import json
+import ssl
 import sys
 
-async def fetch_exchange_rates(session, days):
-    url = f'https://api.privatbank.ua/p24api/exchange_rates?json&date={days}'
+class PrivatBankAPI:
+    BASE_URL = "https://api.privatbank.ua/p24api/"
 
-    async with session.get(url) as response:
-        data = await response.json()
+    def __init__(self):
+        self.ssl_ctx = ssl.create_default_context()
+        self.ssl_ctx.check_hostname = False
+        self.ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    async def fetch_exchange_rates(self, date):
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self.ssl_ctx)) as session:
+            url = f"{self.BASE_URL}exchange_rates?json&date={date}"
+            async with session.get(url) as response:
+                return await response.json()
+
+    async def get_currency_rates(self, date):
+        data = await self.fetch_exchange_rates(date)
         return data
 
-async def get_rates(days, currencies):
-    async with aiohttp.ClientSession() as session:
-        data = await fetch_exchange_rates(session, days)
-        exchange_rates = data['exchangeRate']
+def get_date_range(start_date, end_date, max_days):
+    dates = []
+    current_date = end_date - timedelta(days=max_days - 1)
+    while current_date <= end_date:
+        dates.append(current_date.strftime("%d.%m.%Y"))
+        current_date += timedelta(days=1)
+    return dates
 
-        result = []
-        for rate in exchange_rates:
-            if rate['currency'] in currencies:
-                date = rate['date']
-                currency = rate['currency']
-                sale = rate['saleRateNB']
-                purchase = rate['purchaseRateNB']
+async def get_rates_for_dates(api, dates):
+    tasks = [api.get_currency_rates(date) for date in dates]
+    return await asyncio.gather(*tasks)
 
-                result.append({
-                    date: {
-                        currency: {
-                            'sale': sale,
-                            'purchase': purchase
-                        }
-                    }
-                })
+def format_currency_data(data):
+    formatted_data = []
+    for rates in data:
+        formatted_rates = {}
+        for rate in rates['exchangeRate']:
+            if rate['currency'] in ('EUR', 'USD'):
+                formatted_rates[rate['currency']] = {
+                    'sale': rate['saleRate'],
+                    'purchase': rate['purchaseRate']
+                }
+        formatted_data.append({rates['date']: formatted_rates})
+    return formatted_data
 
-        return result
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python main.py <days> <currency1> <currency2> ...")
+async def main():
+    if len(sys.argv) != 2:
+        print("Usage: py .\\main.py <number of days>")
         return
 
     try:
-        days = int(sys.argv[1])
-        if days > 10:
-            print("Error: Days cannot be more than 10.")
+        max_days = int(sys.argv[1])
+        if max_days > 10:
+            print("Maximum number of days allowed is 10.")
             return
-
-        currencies = sys.argv[2:]
-        if not currencies:
-            print("Error: At least one currency must be provided.")
-            return
-
-        loop = asyncio.get_event_loop()
-        result = loop.run_until_complete(get_rates(days, currencies))
-        print(result)
-
     except ValueError:
-        print("Error: Days must be a valid integer.")
+        print("Invalid number of days.")
+        return
+
+    api = PrivatBankAPI()
+    today = datetime.today()
+    date_range = get_date_range(today - timedelta(days=max_days), today, max_days)
+    currency_data = await get_rates_for_dates(api, date_range)
+    formatted_data = format_currency_data(currency_data)
+
+    print(json.dumps(formatted_data, indent=2))
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
